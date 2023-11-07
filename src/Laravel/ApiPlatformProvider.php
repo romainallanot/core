@@ -96,7 +96,9 @@ use ApiPlatform\State\Provider\ContentNegotiationProvider;
 use ApiPlatform\State\Provider\DeserializeProvider;
 use ApiPlatform\State\Provider\ReadProvider;
 use ApiPlatform\State\ProviderInterface;
-use Illuminate\Foundation\Application;
+use Illuminate\Config\Repository;
+use Illuminate\Contracts\Foundation\Application;
+use Illuminate\Contracts\Foundation\CachesRoutes;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Route;
 use Illuminate\Routing\RouteCollection;
@@ -138,21 +140,10 @@ class ApiPlatformProvider extends ServiceProvider
     {
         $this->mergeConfigFrom(__DIR__.'/config/api-platform.php', 'api-platform');
 
-        // $debug = config('debug') ?? false;
+        /** @var Repository $config */
+        $config = $this->app['config'];
+
         $defaultContext = [];
-        $patchFormats = config('api-platform.patch_formats') ?? ['json' => ['application/merge-patch+json']];
-        $formats = config('api-platform.formats') ?? ['jsonld' => ['application/ld+json']];
-        $docsFormats = config('api-platform.docs_formats') ?? [
-            'jsonopenapi' => ['application/vnd.openapi+json'],
-            'json' => ['application/json'],
-            'jsonld' => ['application/ld+json'],
-            'html' => ['text/html'],
-        ];
-        $errorFormats = config('api-platform.error_formats') ?? [
-            'jsonproblem' => ['application/problem+json'],
-        ];
-        $pagination = config('api-platform.collection.pagination');
-        $graphqlPagination = [];
 
         $this->app->singleton(PropertyInfoExtractorInterface::class, function () {
             $phpDocExtractor = class_exists(DocBlockFactory::class) ? new PhpDocExtractor() : null;
@@ -175,8 +166,8 @@ class ApiPlatformProvider extends ServiceProvider
 
         $this->app->bind(PathSegmentNameGeneratorInterface::class, UnderscorePathSegmentNameGenerator::class);
 
-        $this->app->singleton(ResourceNameCollectionFactoryInterface::class, function () {
-            $paths = config('api-platform.resources') ?? [];
+        $this->app->singleton(ResourceNameCollectionFactoryInterface::class, function () use ($config) {
+            $paths = $config->get('api-platform.resources') ?? [];
             $refl = new \ReflectionClass(Error::class);
             $paths[] = \dirname($refl->getFileName());
 
@@ -215,7 +206,7 @@ class ApiPlatformProvider extends ServiceProvider
         });
 
         // TODO: add cached metadata factories
-        $this->app->singleton(ResourceMetadataCollectionFactoryInterface::class, function (Application $app) use ($formats, $patchFormats) {
+        $this->app->singleton(ResourceMetadataCollectionFactoryInterface::class, function (Application $app) use ($config) {
             return new EloquentResourceCollectionMetadataFactory(new AlternateUriResourceMetadataCollectionFactory(
                 new FiltersResourceMetadataCollectionFactory(
                     new FormatsResourceMetadataCollectionFactory(
@@ -230,15 +221,15 @@ class ApiPlatformProvider extends ServiceProvider
                                             new NotExposedOperationResourceMetadataCollectionFactory(
                                                 $this->app->make(LinkFactoryInterface::class),
                                                 // TODO: graphql
-                                                new AttributesResourceMetadataCollectionFactory(null, $app->make(LoggerInterface::class), ['routePrefix' => config('api-platform.prefix') ?? '/'], false)
+                                                new AttributesResourceMetadataCollectionFactory(null, $app->make(LoggerInterface::class), ['routePrefix' => $config->get('api-platform.prefix') ?? '/'], false)
                                             )
                                         )
                                     )
                                 )
                             )
                         ),
-                        $formats,
-                        $patchFormats,
+                        $config->get('api-platform.formats'),
+                        $config->get('api-platform.patch_formats'),
                     )
                 )
             ));
@@ -265,8 +256,8 @@ class ApiPlatformProvider extends ServiceProvider
         $this->app->singleton(ReadProvider::class, function (Application $app) {
             return new ReadProvider($app->make(CallableProvider::class));
         });
-        $this->app->singleton(ContentNegotiationProvider::class, function (Application $app) use ($formats, $errorFormats) {
-            return new ContentNegotiationProvider($app->make(DeserializeProvider::class), new Negotiator(), $formats, $errorFormats);
+        $this->app->singleton(ContentNegotiationProvider::class, function (Application $app) use ($config) {
+            return new ContentNegotiationProvider($app->make(DeserializeProvider::class), new Negotiator(), $config->get('api-platform.formats'), $config->get('api-platform.error_formats'));
         });
 
         $this->app->singleton(DeserializeProvider::class, function (Application $app) {
@@ -384,6 +375,7 @@ class ApiPlatformProvider extends ServiceProvider
                 $app->make(ResourceClassResolverInterface::class),
                 $app->make(PropertyAccessorInterface::class),
                 $app->make(NameConverterInterface::class),
+                $app->make(ClassMetadataFactoryInterface::class),
                 $app->make(LoggerInterface::class),
                 $app->make(ResourceMetadataCollectionFactoryInterface::class),
                 /* $resourceAccessChecker */ null,
@@ -418,12 +410,12 @@ class ApiPlatformProvider extends ServiceProvider
             );
         });
 
-        $this->app->singleton(Options::class, function (Application $app) {
-            return new Options(title: config('api-platform.title') ?? '');
+        $this->app->singleton(Options::class, function (Application $app) use ($config) {
+            return new Options(title: $config->get('api-platform.title') ?? '');
         });
 
-        $this->app->singleton(DocumentationAction::class, function (Application $app) use ($docsFormats) {
-            return new DocumentationAction($app->make(ResourceNameCollectionFactoryInterface::class), config('api-platform.title') ?? '', config('api-platform.description') ?? '', config('api-platform.version') ?? '', $app->make(OpenApiFactoryInterface::class), $app->make(ProviderInterface::class), $app->make(ProcessorInterface::class), $app->make(Negotiator::class), $docsFormats);
+        $this->app->singleton(DocumentationAction::class, function (Application $app) use ($config) {
+            return new DocumentationAction($app->make(ResourceNameCollectionFactoryInterface::class), $config->get('api-platform.title') ?? '', $config->get('api-platform.description') ?? '', $config->get('api-platform.version') ?? '', $app->make(OpenApiFactoryInterface::class), $app->make(ProviderInterface::class), $app->make(ProcessorInterface::class), $app->make(Negotiator::class), $config->get('api-platform.docs_formats'));
         });
 
         $this->app->singleton(FilterLocator::class, FilterLocator::class);
@@ -432,11 +424,13 @@ class ApiPlatformProvider extends ServiceProvider
             return new EntrypointAction($app->make(ResourceNameCollectionFactoryInterface::class), $app->make(ProviderInterface::class), $app->make(ProcessorInterface::class), ['jsonld' => ['application/ld+json']]);
         });
 
-        $this->app->singleton(Pagination::class, function () use ($pagination, $graphqlPagination) {
-            return new Pagination($pagination, $graphqlPagination);
+        $this->app->singleton(Pagination::class, function () use ($config) {
+            return new Pagination($config->get('api-platform.collection.pagination'), []);
         });
 
-        $this->app->singleton(PaginationOptions::class, function () use ($pagination) {
+        $this->app->singleton(PaginationOptions::class, function () use ($config) {
+            $pagination = $config->get('api-platform.collection.pagination');
+
             return new PaginationOptions(
                 $pagination['enabled'],
                 $pagination['page_parameter_name'],
@@ -453,7 +447,7 @@ class ApiPlatformProvider extends ServiceProvider
         });
 
         $this->app->bind(OpenApiFactoryInterface::class, OpenApiFactory::class);
-        $this->app->singleton(OpenApiFactory::class, function (Application $app) use ($formats) {
+        $this->app->singleton(OpenApiFactory::class, function (Application $app) use ($config) {
             return new OpenApiFactory(
                 $app->make(ResourceNameCollectionFactoryInterface::class),
                 $app->make(ResourceMetadataCollectionFactoryInterface::class),
@@ -462,7 +456,7 @@ class ApiPlatformProvider extends ServiceProvider
                 $app->make(SchemaFactoryInterface::class),
                 $app->make(TypeFactoryInterface::class),
                 $app->make(FilterLocator::class),
-                $formats,
+                $config->get('api-platform.formats'),
                 null, // ?Options $openApiOptions = null,
                 $app->make(PaginationOptions::class), // ?PaginationOptions $paginationOptions = null,
                 // ?RouterInterface $router = null
@@ -572,11 +566,11 @@ class ApiPlatformProvider extends ServiceProvider
     {
         if ($this->app->runningInConsole()) {
             $this->publishes([
-                __DIR__.'/config/api-platform.php' => config_path('api-platform.php'),
+                __DIR__.'/config/api-platform.php' => $this->app->configPath('api-platform.php'),
             ], 'laravel-assets');
 
             $this->publishes([
-                __DIR__.'/public' => public_path('vendor/api-platform'),
+                __DIR__.'/public' => $this->app->publicPath('vendor/api-platform'),
             ], 'laravel-assets');
         }
 
@@ -603,11 +597,12 @@ class ApiPlatformProvider extends ServiceProvider
             }
         }
 
-        $route = new Route(['GET'], (config('api-platform.prefix') ?? '').'/contexts/{shortName?}{_format?}', [ContextAction::class, '__invoke']);
+        $prefix = $this->app['config']->get('api-platform.prefix') ?? '';
+        $route = new Route(['GET'], $prefix.'/contexts/{shortName?}{_format?}', [ContextAction::class, '__invoke']);
         $route->name('api_jsonld_context')->middleware(ApiPlatformMiddleware::class);
         $routeCollection->add($route);
         // Maybe that we can alias Symfony Request to Laravel Request within the provider ?
-        $route = new Route(['GET'], (config('api-platform.prefix') ?? '').'/docs{_format?}', function (Request $request, Application $app) {
+        $route = new Route(['GET'], $prefix.'/docs{_format?}', function (Request $request, Application $app) {
             $documentationAction = $app->make(DocumentationAction::class);
 
             return $documentationAction->__invoke($request);
@@ -615,7 +610,7 @@ class ApiPlatformProvider extends ServiceProvider
         $route->name('api_doc')->middleware(ApiPlatformMiddleware::class);
         $routeCollection->add($route);
 
-        $route = new Route(['GET'], (config('api-platform.prefix') ?? '').'/{index?}{_format?}', function (Request $request, Application $app) {
+        $route = new Route(['GET'], $prefix.'/{index?}{_format?}', function (Request $request, Application $app) {
             $entrypointAction = $app->make(EntrypointAction::class);
 
             return $entrypointAction->__invoke($request);
@@ -627,11 +622,11 @@ class ApiPlatformProvider extends ServiceProvider
 
     private function shouldRegisterRoutes(): bool
     {
-        if (!config('api-platform.register_routes')) {
+        if (!$this->app['config']->get('api-platform.register_routes')) {
             return false;
         }
 
-        if ($this->app->routesAreCached()) {
+        if ($this->app instanceof CachesRoutes && $this->app->routesAreCached()) {
             return false;
         }
 
